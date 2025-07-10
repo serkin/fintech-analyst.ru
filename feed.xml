@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom" xml:lang="ru"><generator uri="https://jekyllrb.com/" version="4.3.4">Jekyll</generator><link href="https://fintech-analyst.ru/feed.xml" rel="self" type="application/atom+xml"/><link href="https://fintech-analyst.ru/" rel="alternate" type="text/html" hreflang="ru"/><updated>2025-07-10T09:05:10+00:00</updated><id>https://fintech-analyst.ru/feed.xml</id><title type="html">Системный аналитик Финтех</title><subtitle>Системный анализ финтех решений </subtitle><entry><title type="html">Single Logger writes to stdout and Graylog</title><link href="https://fintech-analyst.ru/blog/2024/Single-Logger-writes-to-stdout-and-Graylog/" rel="alternate" type="text/html" title="Single Logger writes to stdout and Graylog"/><published>2024-12-22T12:47:00+00:00</published><updated>2024-12-22T12:47:00+00:00</updated><id>https://fintech-analyst.ru/blog/2024/Single%20Logger%20writes%20to%20stdout%20and%20Graylog</id><content type="html" xml:base="https://fintech-analyst.ru/blog/2024/Single-Logger-writes-to-stdout-and-Graylog/"><![CDATA[<p>First challenge in my current position was to ease the debugging process. We have k8s+argocd set up and all our microservices spin there.</p> <p>So when something went wrong the only way was to download logs from argocd and grep them. While we didn’t have lots of clients it was acceptable but slow. Another problem is that after deployment all logs disappear from argocd.</p> <p>So I talked to operations to set up the Graylog cluster. I previously had a positive experience with Graylog. Even with all the java-based-memory-greedy arguments from ops I managed to get that cluster.</p> <p>Next step was to make reading logs as convenient as possible. I didn’t like the idea to send log records separately to Graylog. I was looking for some simple implementation where I can somehow aggregate logs so one http request to microservices would be only a log record.</p> <p>It is too early to pull Jaeger with Open Telemetry just for logs. Tracing is a future problem for us.</p> <p>Solution was to write a simple logger that supports standard python logging interface and at the same time aggregates log before sending it to Graylog. For argocd I wanted to keep logging line by line.</p> <p>What I came up with as follows</p> <div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kn">import</span> <span class="n">logging</span>
+<span class="kn">import</span> <span class="n">sys</span>
+<span class="kn">import</span> <span class="n">graypy</span>
+<span class="kn">from</span> <span class="n">src.config</span> <span class="kn">import</span> <span class="n">CONFIG</span>
+<span class="kn">from</span> <span class="n">colorlog</span> <span class="kn">import</span> <span class="n">ColoredFormatter</span>
+
+<span class="k">class</span> <span class="nc">MemoryHandler</span><span class="p">(</span><span class="n">logging</span><span class="p">.</span><span class="n">Handler</span><span class="p">):</span>
+    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="n">self</span><span class="p">):</span>
+        <span class="nf">super</span><span class="p">().</span><span class="nf">__init__</span><span class="p">()</span>
+        <span class="n">self</span><span class="p">.</span><span class="n">log_messages</span> <span class="o">=</span> <span class="p">[]</span>
+
+    <span class="k">def</span> <span class="nf">emit</span><span class="p">(</span><span class="n">self</span><span class="p">,</span> <span class="n">record</span><span class="p">):</span>
+        <span class="n">log_entry</span> <span class="o">=</span> <span class="n">self</span><span class="p">.</span><span class="nf">format</span><span class="p">(</span><span class="n">record</span><span class="p">)</span>
+        <span class="n">self</span><span class="p">.</span><span class="n">log_messages</span><span class="p">.</span><span class="nf">append</span><span class="p">(</span><span class="n">log_entry</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">dump</span><span class="p">(</span><span class="n">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+        <span class="n">log_messages</span> <span class="o">=</span> <span class="sh">"</span><span class="se">\n</span><span class="sh">"</span><span class="p">.</span><span class="nf">join</span><span class="p">(</span><span class="n">self</span><span class="p">.</span><span class="n">log_messages</span><span class="p">)</span>
+        <span class="n">self</span><span class="p">.</span><span class="n">log_messages</span><span class="p">.</span><span class="nf">clear</span><span class="p">()</span>
+        <span class="k">return</span> <span class="n">log_messages</span>
+
+
+<span class="k">def</span> <span class="nf">custom_formatter</span><span class="p">(</span><span class="n">level</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">level</span> <span class="o">&gt;=</span> <span class="n">logging</span><span class="p">.</span><span class="n">ERROR</span><span class="p">:</span>
+        <span class="n">fmt</span> <span class="o">=</span> <span class="sh">'</span><span class="s">%(levelname)s: %(message)s</span><span class="sh">'</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">fmt</span> <span class="o">=</span> <span class="sh">'</span><span class="s">%(message)s</span><span class="sh">'</span>
+    <span class="k">return</span> <span class="n">logging</span><span class="p">.</span><span class="nc">Formatter</span><span class="p">(</span><span class="n">fmt</span><span class="p">)</span>
+
+  
+<span class="k">class</span> <span class="nc">Logger</span><span class="p">(</span><span class="n">logging</span><span class="p">.</span><span class="n">Logger</span><span class="p">):</span>
+    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="n">self</span><span class="p">,</span> <span class="n">name</span><span class="p">):</span>
+        <span class="nf">super</span><span class="p">().</span><span class="nf">__init__</span><span class="p">(</span><span class="n">name</span><span class="p">)</span>
+
+        <span class="k">if</span> <span class="n">name</span> <span class="o">==</span> <span class="sh">"</span><span class="s">graylog</span><span class="sh">"</span><span class="p">:</span>
+            <span class="n">graylog_handler</span> <span class="o">=</span> <span class="n">graypy</span><span class="p">.</span><span class="nc">GELFUDPHandler</span><span class="p">(</span><span class="n">CONFIG</span><span class="p">.</span><span class="n">GRAYLOG_HOST</span><span class="p">,</span> <span class="n">CONFIG</span><span class="p">.</span><span class="n">GRAYLOG_PORT</span><span class="p">)</span>
+            <span class="n">graylog_handler</span><span class="p">.</span><span class="nf">setLevel</span><span class="p">(</span><span class="n">logging</span><span class="p">.</span><span class="n">DEBUG</span><span class="p">)</span>
+            <span class="n">self</span><span class="p">.</span><span class="nf">addHandler</span><span class="p">(</span><span class="n">graylog_handler</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">stream_handler</span> <span class="o">=</span> <span class="n">logging</span><span class="p">.</span><span class="nc">StreamHandler</span><span class="p">(</span><span class="n">sys</span><span class="p">.</span><span class="n">stdout</span><span class="p">)</span>
+            <span class="n">stream_handler</span><span class="p">.</span><span class="nf">setLevel</span><span class="p">(</span><span class="n">logging</span><span class="p">.</span><span class="n">DEBUG</span><span class="p">)</span>
+
+            <span class="n">colored_formatter</span> <span class="o">=</span> <span class="nc">ColoredFormatter</span><span class="p">(</span><span class="sh">'</span><span class="s">%(asctime)s %(log_color)s%(levelname)s: %(message)s</span><span class="sh">'</span><span class="p">)</span>
+            <span class="n">stream_handler</span><span class="p">.</span><span class="nf">setFormatter</span><span class="p">(</span><span class="n">colored_formatter</span><span class="p">)</span>
+            <span class="n">self</span><span class="p">.</span><span class="nf">addHandler</span><span class="p">(</span><span class="n">stream_handler</span><span class="p">)</span>
+
+            <span class="n">self</span><span class="p">.</span><span class="n">memory_handler</span> <span class="o">=</span> <span class="nc">MemoryHandler</span><span class="p">()</span>
+            <span class="n">self</span><span class="p">.</span><span class="n">memory_handler</span><span class="p">.</span><span class="nf">setLevel</span><span class="p">(</span><span class="n">logging</span><span class="p">.</span><span class="n">DEBUG</span><span class="p">)</span>
+            <span class="n">self</span><span class="p">.</span><span class="nf">addHandler</span><span class="p">(</span><span class="n">self</span><span class="p">.</span><span class="n">memory_handler</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">handle</span><span class="p">(</span><span class="n">self</span><span class="p">,</span> <span class="n">record</span><span class="p">):</span>
+        <span class="n">custom_fmt</span> <span class="o">=</span> <span class="nf">custom_formatter</span><span class="p">(</span><span class="n">record</span><span class="p">.</span><span class="n">levelno</span><span class="p">)</span>
+        <span class="k">if</span> <span class="nf">hasattr</span><span class="p">(</span><span class="n">self</span><span class="p">,</span> <span class="sh">'</span><span class="s">memory_handler</span><span class="sh">'</span><span class="p">):</span>
+            <span class="n">self</span><span class="p">.</span><span class="n">memory_handler</span><span class="p">.</span><span class="nf">setFormatter</span><span class="p">(</span><span class="n">custom_fmt</span><span class="p">)</span>
+        <span class="nf">super</span><span class="p">().</span><span class="nf">handle</span><span class="p">(</span><span class="n">record</span><span class="p">)</span>
+
+<span class="n">logger</span> <span class="o">=</span> <span class="nc">Logger</span><span class="p">(</span><span class="sh">"</span><span class="s">stdout+memory</span><span class="sh">"</span><span class="p">)</span>
+<span class="n">graylog</span> <span class="o">=</span> <span class="nc">Logger</span><span class="p">(</span><span class="sh">"</span><span class="s">graylog</span><span class="sh">"</span><span class="p">)</span>
+</code></pre></div></div> <p>This solution works well so far but I kinda have a feeling that sometimes logs mixed up like we are having thread issues. Looking into it</p> <p>You can download the whole solution <a href="/assets/labs_files/lab_148.zip">here</a></p>]]></content><author><name></name></author><category term="logging,"/><category term="python"/><summary type="html"><![CDATA[Figuring out the most convenient way to see logs for my team]]></summary></entry></feed>
